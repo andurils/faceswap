@@ -6,7 +6,7 @@ import sys
 from importlib import import_module
 
 # Importing the various tools
-from lib.cli import FullHelpArgumentParser
+from lib.cli.args import FullHelpArgumentParser
 
 # Python version check
 if sys.version_info[0] < 3:
@@ -15,7 +15,7 @@ if sys.version_info[0] == 3 and sys.version_info[1] < 2:
     raise Exception("This program requires at least python3.2")
 
 
-def bad_args(args):  # pylint:disable=unused-argument
+def bad_args(*args):  # pylint:disable=unused-argument
     """ Print help on bad arguments """
     PARSER.print_help()
     sys.exit(0)

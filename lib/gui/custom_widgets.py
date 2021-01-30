@@ -8,6 +8,8 @@ import sys
 import tkinter as tk
 from tkinter import ttk, TclError
 
+import numpy as np
+
 from .utils import get_config
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -527,9 +529,8 @@ class StatusBar(ttk.Frame):  # pylint: disable=too-many-ancestors
             self._pbar_position.set(position)
 
 
-class Tooltip:
-    """
-    Create a tooltip for a given widget as the mouse goes on it.
+class Tooltip:  # pylint:disable=too-few-public-methods
+    """ Create a tooltip for a given widget as the mouse goes on it.
 
     Parameters
     ----------
@@ -541,6 +542,9 @@ class Tooltip:
         (left, top, right, bottom) padding for the tool-tip. Default: (5, 3, 5, 3)
     text: str, optional
         The text to be displayed in the tool-tip. Default: 'widget info'
+    text_variable: :class:`tkinter.strVar`, optional
+        The text variable to use for dynamic help text. Appended after the contents of :attr:`text`
+        if provided. Default: ``None``
     waittime: int, optional
         The time in milliseconds to wait before showing the tool-tip. Default: 400
     wraplength: int, optional
@@ -558,12 +562,13 @@ class Tooltip:
     http://www.daniweb.com/programming/software-development/code/484591/a-tooltip-class-for-tkinter
     """
     def __init__(self, widget, *, background="#FFFFEA", pad=(5, 3, 5, 3), text="widget info",
-                 waittime=400, wraplength=250):
+                 text_variable=None, waittime=400, wraplength=250):
 
         self._waittime = waittime  # in milliseconds, originally 500
         self._wraplength = wraplength  # in pixels, originally 180
         self._widget = widget
         self._text = text
+        self._text_variable = text_variable
         self._widget.bind("<Enter>", self._on_enter)
         self._widget.bind("<Leave>", self._on_leave)
         self._widget.bind("<ButtonPress>", self._on_leave)
@@ -656,8 +661,12 @@ class Tooltip:
         win = tk.Frame(self._topwidget,
                        background=background,
                        borderwidth=0)
+
+        text = self._text
+        if self._text_variable and self._text_variable.get():
+            text += "\n\nCurrent value: '{}'".format(self._text_variable.get())
         label = tk.Label(win,
-                         text=self._text,
+                         text=text,
                          justify=tk.LEFT,
                          background=background,
                          relief=tk.SOLID,
@@ -679,3 +688,200 @@ class Tooltip:
         if topwidget:
             topwidget.destroy()
         self._topwidget = None
+
+
+class MultiOption(ttk.Checkbutton):  # pylint: disable=too-many-ancestors
+    """ Similar to the standard :class:`ttk.Radio` widget, but with the ability to select
+    multiple pre-defined options. Selected options are generated as `nargs` for the argument
+    parser to consume.
+
+    Parameters
+    ----------
+    parent: :class:`ttk.Frame`
+        The tkinter parent widget for the check button
+    value: str
+        The raw option value for this check button
+    variable: :class:`tkinter.StingVar`
+        The master variable for the group of check buttons that this check button will belong to.
+        The output of this variable will be a string containing a space separated list of the
+        selected check button options
+    """
+    def __init__(self, parent, value, variable, **kwargs):
+        self._tk_var = tk.BooleanVar()
+        self._tk_var.set(value == variable.get())
+        super().__init__(parent, variable=self._tk_var, **kwargs)
+        self._value = value
+        self._master_variable = variable
+        self._tk_var.trace("w", self._on_update)
+        self._master_variable.trace("w", self._on_master_update)
+
+    @property
+    def _master_list(self):
+        """ list: The contents of the check box group's :attr:`_master_variable` in list form.
+        Selected check boxes will appear in this list. """
+        retval = self._master_variable.get().split()
+        logger.trace(retval)
+        return retval
+
+    @property
+    def _master_needs_update(self):
+        """ bool: ``True`` if :attr:`_master_variable` requires updating otherwise ``False``. """
+        active = self._tk_var.get()
+        retval = ((active and self._value not in self._master_list) or
+                  (not active and self._value in self._master_list))
+        logger.trace(retval)
+        return retval
+
+    def _on_update(self, *args):  # pylint: disable=unused-argument
+        """ Update the master variable on a check button change.
+
+        The value for this checked option is added or removed from the :attr:`_master_variable`
+        on a ``True``, ``False`` change for this check button.
+
+        Parameters
+        ----------
+        args: tuple
+            Required for variable callback, but unused
+        """
+        if not self._master_needs_update:
+            return
+        new_vals = self._master_list + [self._value] if self._tk_var.get() else [
+            val
+            for val in self._master_list
+            if val != self._value]
+        val = " ".join(new_vals)
+        logger.trace("Setting master variable to: %s", val)
+        self._master_variable.set(val)
+
+    def _on_master_update(self, *args):  # pylint: disable=unused-argument
+        """ Update the check button on a master variable change (e.g. load .fsw file in the GUI).
+
+        The value for this option is set to ``True`` or ``False`` depending on it's existence in
+        the :attr:`_master_variable`
+
+        Parameters
+        ----------
+        args: tuple
+            Required for variable callback, but unused
+        """
+        if not self._master_needs_update:
+            return
+        state = self._value in self._master_list
+        logger.trace("Setting '%s' to %s", self._value, state)
+        self._tk_var.set(state)
+
+
+class PopupProgress(tk.Toplevel):
+    """ A simple pop up progress bar that appears of the center of the root window.
+
+    When this is called, the root will be disabled until the :func:`close` method is called.
+
+    Parameters
+    ----------
+    title: str
+        The title to appear above the progress bar
+    total: int or float
+        The total count of items for the progress bar
+
+    Example
+    -------
+    >>> total = 100
+    >>> progress = PopupProgress("My title...", total)
+    >>> for i in range(total):
+    >>>     progress.update(1)
+    >>> progress.close()
+    """
+    def __init__(self, title, total):
+        super().__init__()
+        self._total = total
+        if platform.system() == "Darwin":  # For Mac OS
+            self.tk.call("::tk::unsupported::MacWindowStyle",
+                         "style", self._w,  # pylint:disable=protected-access
+                         "help", "none")
+        # Leaves only the label and removes the app window
+        self.wm_overrideredirect(True)
+        self.attributes('-topmost', 'true')
+        self.transient()
+
+        self._lbl_title = self._set_title(title)
+        self._progress_bar = self._get_progress_bar()
+
+        offset = np.array((self.master.winfo_rootx(), self.master.winfo_rooty()))
+        # TODO find way to get dimensions of the pop up without it flicking onto the screen
+        self.update_idletasks()
+        center = np.array((
+            (self.master.winfo_width() // 2) - (self.winfo_width() // 2),
+            (self.master.winfo_height() // 2) - (self.winfo_height() // 2))) + offset
+        self.wm_geometry("+{}+{}".format(*center))
+        get_config().set_cursor_busy()
+        self.grab_set()
+
+    @property
+    def progress_bar(self):
+        """ :class:`tkinter.ttk.Progressbar`: The progress bar object within the pop up window. """
+        return self._progress_bar
+
+    def _set_title(self, title):
+        """ Set the initial title of the pop up progress bar.
+
+        Parameters
+        ----------
+        title: str
+            The title to appear above the progress bar
+
+        Returns
+        -------
+        :class:`tkinter.ttk.Label`
+            The heading label for the progress bar
+        """
+        frame = ttk.Frame(self)
+        frame.pack(side=tk.TOP, padx=5, pady=5)
+        lbl = ttk.Label(frame, text=title)
+        lbl.pack(side=tk.TOP, pady=(5, 0), expand=True, fill=tk.X)
+        return lbl
+
+    def _get_progress_bar(self):
+        """ Set up the progress bar with the supplied total.
+
+        Returns
+        -------
+        :class:`tkinter.ttk.Progressbar`
+            The configured progress bar for the pop up window
+        """
+        frame = ttk.Frame(self)
+        frame.pack(side=tk.BOTTOM, padx=5, pady=(0, 5))
+        pbar = ttk.Progressbar(frame,
+                               length=400,
+                               maximum=self._total,
+                               mode="determinate")
+        pbar.pack(side=tk.LEFT)
+        return pbar
+
+    def step(self, amount):
+        """ Increment the progress bar.
+
+        Parameters
+        ----------
+        amount: int or float
+            The amount to increment the progress bar by
+        """
+        self._progress_bar.step(amount)
+        self._progress_bar.update_idletasks()
+
+    def stop(self):
+        """ Stop the progress bar, re-enable the root window and destroy the pop up window. """
+        self._progress_bar.stop()
+        get_config().set_cursor_default()
+        self.grab_release()
+        self.destroy()
+
+    def update_title(self, title):
+        """ Update the title that displays above the progress bar.
+
+        Parameters
+        ----------
+        title: str
+            The title to appear above the progress bar
+        """
+        self._lbl_title.config(text=title)
+        self._lbl_title.update_idletasks()

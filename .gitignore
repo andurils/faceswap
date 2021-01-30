@@ -33,8 +33,13 @@
 !plugins/train/*
 !plugins/convert/*
 !.pylintrc
+!tests
+!tests/*
+!tests/*/*
 !tools
 !tools/*
+!tools/*/*
+!tools/*/*/*
 !_travis
 !_travis/*
 !.travis.yml

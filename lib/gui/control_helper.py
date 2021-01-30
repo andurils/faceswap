@@ -4,14 +4,13 @@ import logging
 import re
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import colorchooser, ttk
 from itertools import zip_longest
 from functools import partial
 
 from _tkinter import Tcl_Obj, TclError
 
-from .custom_widgets import ContextMenu
-from .custom_widgets import Tooltip
+from .custom_widgets import ContextMenu, MultiOption, Tooltip
 from .utils import FileHandler, get_config, get_images
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -22,13 +21,14 @@ logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 _RECREATE_OBJECTS = dict(tooltips=dict(), commands=dict(), contextmenus=dict())
 
 
-def _get_tooltip(widget, text, wraplength=600):
+def _get_tooltip(widget, text=None, text_variable=None, wraplength=600):
     """ Store the tooltip layout and widget id in _TOOLTIPS and return a tooltip """
     _RECREATE_OBJECTS["tooltips"][str(widget)] = {"text": text,
+                                                  "text_variable": text_variable,
                                                   "wraplength": wraplength}
     logger.debug("Adding to tooltips dict: (widget: %s. text: '%s', wraplength: %s)",
                  widget, text, wraplength)
-    return Tooltip(widget, text=text, wraplength=wraplength)
+    return Tooltip(widget, text=text, text_variable=text_variable, wraplength=wraplength)
 
 
 def _get_contextmenu(widget):
@@ -86,15 +86,21 @@ class ControlPanelOption():
     group: str, optional
         The group that this control should sit with. If provided, all controls in the same
         group will be placed together. Default: None
+    subgroup: str, optional
+        The subgroup that this option belongs to. If provided, will group options in the same
+        subgroups together for the same layout as option/check boxes. Default: ``None``
     default: str, optional
         Default value for the control. If None is provided, then action will be dictated by
         whether "blank_nones" is set in ControlPanel
     initial_value: str, optional
         Initial value for the control. If None, default will be used
     choices: list or tuple, object
-        Used for combo boxes and radio control option setting
+        Used for combo boxes and radio control option setting. Set to `"colorchooser"` for a color
+        selection dialog.
     is_radio: bool, optional
         Specifies to use a Radio control instead of combobox if choices are passed
+    is_multi_option:
+        Specifies to use a Multi Check Button option group for the specified control
     rounding: int or float, optional
         For slider controls. Sets the stepping
     min_max: int or float, optional
@@ -112,29 +118,33 @@ class ControlPanelOption():
     """
 
     def __init__(self, title, dtype,  # pylint:disable=too-many-arguments
-                 group=None, default=None, initial_value=None, choices=None, is_radio=False,
-                 rounding=None, min_max=None, sysbrowser=None, helptext=None,
-                 track_modified=False, command=None):
-        logger.debug("Initializing %s: (title: '%s', dtype: %s, group: %s, default: %s, "
-                     "initial_value: %s, choices: %s, is_radio: %s, rounding: %s, min_max: %s, "
-                     "sysbrowser: %s, helptext: '%s', track_modified: %s, command: '%s')",
-                     self.__class__.__name__, title, dtype, group, default, initial_value, choices,
-                     is_radio, rounding, min_max, sysbrowser, helptext, track_modified, command)
+                 group=None, subgroup=None, default=None, initial_value=None, choices=None,
+                 is_radio=False, is_multi_option=False, rounding=None, min_max=None,
+                 sysbrowser=None, helptext=None, track_modified=False, command=None):
+        logger.debug("Initializing %s: (title: '%s', dtype: %s, group: %s, subgroup: %s, "
+                     "default: %s, initial_value: %s, choices: %s, is_radio: %s, "
+                     "is_multi_option: %s, rounding: %s, min_max: %s, sysbrowser: %s, "
+                     "helptext: '%s', track_modified: %s, command: '%s')", self.__class__.__name__,
+                     title, dtype, group, subgroup, default, initial_value, choices, is_radio,
+                     is_multi_option, rounding, min_max, sysbrowser, helptext, track_modified,
+                     command)
 
         self.dtype = dtype
         self.sysbrowser = sysbrowser
         self._command = command
         self._options = dict(title=title,
+                             subgroup=subgroup,
                              group=group,
                              default=default,
                              initial_value=initial_value,
                              choices=choices,
                              is_radio=is_radio,
+                             is_multi_option=is_multi_option,
                              rounding=rounding,
                              min_max=min_max,
                              helptext=helptext)
         self.control = self.get_control()
-        self.tk_var = self.get_tk_var(track_modified)
+        self.tk_var = self.get_tk_var(initial_value, track_modified)
         logger.debug("Initialized %s", self.__class__.__name__)
 
     @property
@@ -153,6 +163,11 @@ class ControlPanelOption():
         group = self._options["group"]
         group = "_master" if group is None else group
         return group
+
+    @property
+    def subgroup(self):
+        """ str: The subgroup for the option, or ``None`` if none provided. """
+        return self._options["subgroup"]
 
     @property
     def default(self):
@@ -177,6 +192,12 @@ class ControlPanelOption():
         return self._options["is_radio"]
 
     @property
+    def is_multi_option(self):
+        """ bool: ``True`` if the control should be contained in a multi check button group,
+        otherwise ``False``. """
+        return self._options["is_multi_option"]
+
+    @property
     def rounding(self):
         """ Return rounding """
         return self._options["rounding"]
@@ -197,7 +218,6 @@ class ControlPanelOption():
             helptext = helptext[2:].replace("\nL|", "\n - ").replace("\n", "\n\n")
         else:
             helptext = helptext.replace("\n\t", "\n - ").replace("%%", "%")
-        helptext = ". ".join(i.capitalize() for i in helptext.split(". "))
         helptext = self.title + " - " + helptext
         logger.debug("Formatted control help: (name: '%s', help: '%s'", self.name, helptext)
         return helptext
@@ -241,19 +261,23 @@ class ControlPanelOption():
     def get_control(self):
         """ Set the correct control type based on the datatype or for this option """
         if self.choices and self.is_radio:
-            control = ttk.Radiobutton
+            control = "radio"
+        elif self.choices and self.is_multi_option:
+            control = "multi"
+        elif self.choices and self.choices == "colorchooser":
+            control = "colorchooser"
         elif self.choices:
             control = ttk.Combobox
         elif self.dtype == bool:
             control = ttk.Checkbutton
         elif self.dtype in (int, float):
-            control = ttk.Scale
+            control = "scale"
         else:
             control = ttk.Entry
         logger.debug("Setting control '%s' to %s", self.title, control)
         return control
 
-    def get_tk_var(self, track_modified):
+    def get_tk_var(self, initial_value, track_modified):
         """ Correct variable type for control """
         if self.dtype == bool:
             var = tk.BooleanVar()
@@ -263,14 +287,16 @@ class ControlPanelOption():
             var = tk.DoubleVar()
         else:
             var = tk.StringVar()
-        logger.debug("Setting tk variable: (name: '%s', dtype: %s, tk_var: %s)",
-                     self.name, self.dtype, var)
+        if initial_value is not None:
+            var.set(initial_value)
+        logger.debug("Setting tk variable: (name: '%s', dtype: %s, tk_var: %s, initial_value: %s)",
+                     self.name, self.dtype, var, initial_value)
         if track_modified and self._command is not None:
             logger.debug("Tracking variable modification: %s", self.name)
             var.trace("w",
                       lambda name, index, mode, cmd=self._command: self._modified_callback(cmd))
 
-        if track_modified and self._command in ("train", "convert") and self.title == "Model Dir":
+        if track_modified and self._command == "train" and self.title == "Model Dir":
             var.trace("w", lambda name, index, mode, v=var: self._model_callback(v))
 
         return var
@@ -362,6 +388,7 @@ class ControlPanel(ttk.Frame):  # pylint:disable=too-many-ancestors
 
         self.header_text = header_text
         self.group_frames = dict()
+        self._sub_group_frames = dict()
 
         self._canvas = tk.Canvas(self, bd=0, highlightthickness=0)
         self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -393,10 +420,10 @@ class ControlPanel(ttk.Frame):  # pylint:disable=too-many-ancestors
         """ Plugin information """
         gui_style = ttk.Style()
         gui_style.configure('White.TFrame', background='#FFFFFF')
-        gui_style.configure('Header.TLabel',
+        gui_style.configure('InfoHeader.TLabel',
                             background='#FFFFFF',
                             font=get_config().default_font + ("bold", ))
-        gui_style.configure('Body.TLabel',
+        gui_style.configure('InfoBody.TLabel',
                             background='#FFFFFF')
 
         info_frame = ttk.Frame(frame, style='White.TFrame', relief=tk.SOLID)
@@ -406,7 +433,7 @@ class ControlPanel(ttk.Frame):  # pylint:disable=too-many-ancestors
         for idx, line in enumerate(self.header_text.splitlines()):
             if not line:
                 continue
-            style = "Header.TLabel" if idx == 0 else "Body.TLabel"
+            style = "InfoHeader.TLabel" if idx == 0 else "InfoBody.TLabel"
             info = ttk.Label(label_frame, text=line, style=style, anchor=tk.W)
             info.bind("<Configure>", self._adjust_wraplength)
             info.pack(fill=tk.X, padx=0, pady=0, expand=True, side=tk.TOP)
@@ -420,7 +447,10 @@ class ControlPanel(ttk.Frame):  # pylint:disable=too-many-ancestors
 
         for option in self.options:
             group_frame = self.get_group_frame(option.group)
-            ctl = ControlBuilder(group_frame["frame"],
+            sub_group_frame = self._get_subgroup_frame(group_frame["frame"], option.subgroup)
+            frame = group_frame["frame"] if sub_group_frame is None else sub_group_frame.subframe
+
+            ctl = ControlBuilder(frame,
                                  option,
                                  label_width=self.label_width,
                                  checkbuttons_frame=group_frame["chkbtns"],
@@ -487,6 +517,18 @@ class ControlPanel(ttk.Frame):  # pylint:disable=too-many-ancestors
         holder = AutoFillContainer(chk_frame, self.option_columns, self.option_columns)
         logger.debug("Added Options CheckButtons Frame")
         return holder
+
+    def _get_subgroup_frame(self, parent, subgroup):
+        if subgroup is None:
+            return subgroup
+        if subgroup not in self._sub_group_frames:
+            sub_frame = ttk.Frame(parent, name="subgroup_{}".format(subgroup))
+            self._sub_group_frames[subgroup] = AutoFillContainer(sub_frame,
+                                                                 self.option_columns,
+                                                                 self.option_columns)
+            sub_frame.pack(anchor=tk.W, expand=True, fill=tk.X)
+            logger.debug("Added Subgroup Frame: %s", subgroup)
+        return self._sub_group_frames[subgroup]
 
 
 class AutoFillContainer():
@@ -590,7 +632,9 @@ class AutoFillContainer():
                                 "pack_info": self.pack_config_cleaner(child),
                                 "name": child.winfo_name(),
                                 "config": self.config_cleaner(child),
-                                "children": self.get_all_children_config(child, [])}
+                                "children": self.get_all_children_config(child, []),
+                                # Some children have custom kwargs, so keep dicts in sync
+                                "custom_kwargs": dict()}
                                for idx, child in enumerate(children)]
         logger.debug("Compiled AutoFillContainer children: %s", self._widget_config)
 
@@ -599,6 +643,15 @@ class AutoFillContainer():
         for child in widget.winfo_children():
             if child.winfo_ismapped():
                 id_ = str(child)
+                if child.__class__.__name__ == "MultiOption":
+                    # MultiOption checkbox groups are a custom object with additional parameter
+                    # requirements.
+                    custom_kwargs = dict(
+                        value=child._value,  # pylint:disable=protected-access
+                        variable=child._master_variable)  # pylint:disable=protected-access
+                else:
+                    custom_kwargs = dict()
+
                 child_list.append({
                     "class": child.__class__,
                     "id": id_,
@@ -607,7 +660,8 @@ class AutoFillContainer():
                     "pack_info": self.pack_config_cleaner(child),
                     "name": child.winfo_name(),
                     "config": self.config_cleaner(child),
-                    "parent": child.winfo_parent()})
+                    "parent": child.winfo_parent(),
+                    "custom_kwargs": custom_kwargs})
             self.get_all_children_config(child, child_list)
         return child_list
 
@@ -668,7 +722,9 @@ class AutoFillContainer():
             else:
                 # Get the next sub-frame if this doesn't have a logged parent
                 parent = self.subframe
-            clone = widget_dict["class"](parent, name=widget_dict["name"])
+            clone = widget_dict["class"](parent,
+                                         name=widget_dict["name"],
+                                         **widget_dict["custom_kwargs"])
             if widget_dict["config"] is not None:
                 clone.configure(**widget_dict["config"])
             if widget_dict["tooltip"] is not None:
@@ -746,7 +802,7 @@ class ControlBuilder():
     def build_control(self):
         """ Build the correct control type for the option passed through """
         logger.debug("Build config option control")
-        if self.option.control not in (ttk.Checkbutton, ttk.Radiobutton):
+        if self.option.control not in (ttk.Checkbutton, "radio", "multi", "colorchooser"):
             self.build_control_label()
         self.build_one_control()
         logger.debug("Built option control")
@@ -764,10 +820,12 @@ class ControlBuilder():
     def build_one_control(self):
         """ Build and place the option controls """
         logger.debug("Build control: '%s')", self.option.name)
-        if self.option.control == ttk.Scale:
+        if self.option.control == "scale":
             ctl = self.slider_control()
-        elif self.option.control == ttk.Radiobutton:
-            ctl = self.radio_control()
+        elif self.option.control in ("radio", "multi"):
+            ctl = self._multi_option_control(self.option.control)
+        elif self.option.control == "colorchooser":
+            ctl = self._color_control()
         elif self.option.control == ttk.Checkbutton:
             ctl = self.control_to_checkframe()
         else:
@@ -775,39 +833,70 @@ class ControlBuilder():
         if self.option.control != ttk.Checkbutton:
             ctl.pack(padx=5, pady=5, fill=tk.X, expand=True)
             if self.option.helptext is not None and not self.helpset:
-                _get_tooltip(ctl, text=self.option.helptext, wraplength=600)
+                tooltip_kwargs = dict(text=self.option.helptext, wraplength=600)
+                if self.option.sysbrowser is not None:
+                    tooltip_kwargs["text_variable"] = self.option.tk_var
+                _get_tooltip(ctl, **tooltip_kwargs)
 
         logger.debug("Built control: '%s'", self.option.name)
 
-    def radio_control(self):
-        """ Create a group of radio buttons """
-        logger.debug("Adding radio group: %s", self.option.name)
-        all_help = [line for line in self.option.helptext.splitlines()]
-        if any(line.startswith(" - ") for line in all_help):
-            intro = all_help[0]
-        helpitems = {re.sub(r'[^A-Za-z0-9\-]+', '',
-                            line.split()[1].lower()): " ".join(line.split()[1:])
-                     for line in all_help
-                     if line.startswith(" - ")}
+    def _multi_option_control(self, option_type):
+        """ Create a group of buttons for single or multi-select
+
+        Parameters
+        ----------
+        option_type: {"radio", "multi"}
+            The type of boxes that this control should hold. "radio" for single item select,
+            "multi" for multi item select.
+
+        """
+        logger.debug("Adding %s group: %s", option_type, self.option.name)
+        help_intro, help_items = self._get_multi_help_items(self.option.helptext)
         ctl = ttk.LabelFrame(self.frame,
                              text=self.option.title,
-                             name="radio_labelframe")
-        radio_holder = AutoFillContainer(ctl, self.option_columns, self.option_columns)
+                             name="{}_labelframe".format(option_type))
+        holder = AutoFillContainer(ctl, self.option_columns, self.option_columns)
         for choice in self.option.choices:
-            radio = ttk.Radiobutton(radio_holder.subframe,
-                                    text=choice.replace("_", " ").title(),
-                                    value=choice,
-                                    variable=self.option.tk_var)
-            if choice.lower() in helpitems:
+            ctl = ttk.Radiobutton if option_type == "radio" else MultiOption
+            ctl = ctl(holder.subframe,
+                      text=choice.replace("_", " ").title(),
+                      value=choice,
+                      variable=self.option.tk_var)
+            if choice.lower() in help_items:
                 self.helpset = True
-                helptext = helpitems[choice.lower()].capitalize()
-                helptext = "{}\n\n - {}".format(
-                    '. '.join(item.capitalize() for item in helptext.split('. ')),
-                    intro)
-                _get_tooltip(radio, text=helptext, wraplength=600)
-            radio.pack(anchor=tk.W)
-            logger.debug("Added radio option %s", choice)
-        return radio_holder.parent
+                helptext = help_items[choice.lower()]
+                helptext = "{}\n\n - {}".format(helptext, help_intro)
+                _get_tooltip(ctl, text=helptext, wraplength=600)
+            ctl.pack(anchor=tk.W)
+            logger.debug("Added %s option %s", option_type, choice)
+        return holder.parent
+
+    @staticmethod
+    def _get_multi_help_items(helptext):
+        """ Split the help text up, for formatted help text, into the individual options
+        for multi/radio buttons.
+
+        Parameters
+        ----------
+        helptext: str
+            The raw help text for this cli. option
+
+        Returns
+        -------
+        tuple (`str`, `dict`)
+            The help text intro and a dictionary containing the help text split into separate
+            entries for each option choice
+        """
+        logger.debug("raw help: %s", helptext)
+        all_help = helptext.splitlines()
+        intro = ""
+        if any(line.startswith(" - ") for line in all_help):
+            intro = all_help[0]
+        retval = (intro, {re.sub(r'[^A-Za-z0-9\-]+', '',
+                                 line.split()[1].lower()): " ".join(line.split()[1:])
+                          for line in all_help if line.startswith(" - ")})
+        logger.debug("help items: %s", retval)
+        return retval
 
     def slider_control(self):
         """ A slider control with corresponding Entry box """
@@ -829,7 +918,7 @@ class ControlBuilder():
                       d_type=self.option.dtype,
                       round_to=self.option.rounding,
                       min_max=self.option.min_max)
-        ctl = self.option.control(self.frame, variable=self.option.tk_var, command=cmd)
+        ctl = ttk.Scale(self.frame, variable=self.option.tk_var, command=cmd)
         _add_command(ctl.cget("command"), cmd)
         rc_menu = _get_contextmenu(tbox)
         rc_menu.cm_bind()
@@ -870,25 +959,55 @@ class ControlBuilder():
         """ Standard non-check buttons sit in the main options frame """
         logger.debug("Add control to Options Frame: (widget: '%s', control: %s, choices: %s)",
                      self.option.name, self.option.control, self.option.choices)
-        if self.option.control == ttk.Checkbutton:
-            ctl = self.option.control(self.frame, variable=self.option.tk_var, text=None)
-        else:
-            if self.option.sysbrowser is not None:
-                self.filebrowser = FileBrowser(self.option.name,
-                                               self.option.tk_var,
-                                               self.frame,
-                                               self.option.sysbrowser)
-            ctl = self.option.control(self.frame,
-                                      textvariable=self.option.tk_var,
-                                      font=get_config().default_font)
-            rc_menu = _get_contextmenu(ctl)
-            rc_menu.cm_bind()
+        if self.option.sysbrowser is not None:
+            self.filebrowser = FileBrowser(self.option.name,
+                                           self.option.tk_var,
+                                           self.frame,
+                                           self.option.sysbrowser)
+
+        ctl = self.option.control(self.frame,
+                                  textvariable=self.option.tk_var,
+                                  font=get_config().default_font)
+        rc_menu = _get_contextmenu(ctl)
+        rc_menu.cm_bind()
+
         if self.option.choices:
             logger.debug("Adding combo choices: %s", self.option.choices)
-            ctl["values"] = [choice for choice in self.option.choices]
+            ctl["values"] = self.option.choices
             ctl["state"] = "readonly"
         logger.debug("Added control to Options Frame: %s", self.option.name)
         return ctl
+
+    def _color_control(self):
+        """ Clickable label holding the currently selected color """
+        logger.debug("Add control to Options Frame: (widget: '%s', control: %s, choices: %s)",
+                     self.option.name, self.option.control, self.option.choices)
+        frame = ttk.Frame(self.frame)
+        ctl = tk.Frame(frame,
+                       bg=self.option.default,
+                       bd=2,
+                       cursor="hand2",
+                       relief=tk.SUNKEN,
+                       width=round(int(20 * get_config().scaling_factor)),
+                       height=round(int(12 * get_config().scaling_factor)))
+        ctl.bind("<Button-1>", lambda *e, c=ctl, t=self.option.title: self._ask_color(c, t))
+        ctl.pack(side=tk.LEFT, anchor=tk.W)
+        lbl = ttk.Label(frame, text=self.option.title, width=self.label_width, anchor=tk.W)
+        lbl.pack(padx=2, pady=5, side=tk.RIGHT, anchor=tk.N)
+        frame.pack(side=tk.LEFT, anchor=tk.W)
+        if self.option.helptext is not None:
+            _get_tooltip(lbl, text=self.option.helptext, wraplength=600)
+        logger.debug("Added control to Options Frame: %s", self.option.name)
+        return ctl
+
+    def _ask_color(self, frame, title):
+        """ Pop ask color dialog set to variable and change frame color """
+        color = self.option.tk_var.get()
+        chosen = colorchooser.askcolor(color=color, title="{} Color".format(title))[1]
+        if chosen is None:
+            return
+        frame.config(bg=chosen)
+        self.option.tk_var.set(chosen)
 
     def control_to_checkframe(self):
         """ Add check-buttons to the check-button frame """
